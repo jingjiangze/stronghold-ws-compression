@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {
   resolveWsCompression, describeWsCompression, createCompressFilter,
   WS_COMPRESSION_MODES, STRONGHOLD_COMPRESSIBLE_TYPES,
+  compressibleTypes, compressibleTypesFrom, parseExtraCompressibleTypes, DEFAULT_EXTRA_COMPRESSIBLE_TYPES,
 } from '../src/wsCompression.mjs';
 
 test('the mode table: off by default, on is the shipped set, safe is the fallback, anything else refused', () => {
@@ -71,4 +72,33 @@ test('an unset mode is off — the default never silently turns compression on',
   assert.equal(describeWsCompression(process.env.WS_COMPRESSION ?? 'off').enabled,
     process.env.WS_COMPRESSION === 'on' || process.env.WS_COMPRESSION === 'safe');
   if (prev === undefined) delete process.env.WS_COMPRESSION;
+});
+
+test('the extra-type switch: unset takes the default, `none` is the one-word rollback', () => {
+  assert.deepEqual([...DEFAULT_EXTRA_COMPRESSIBLE_TYPES], ['b.start']);
+  assert.deepEqual(parseExtraCompressibleTypes(undefined), DEFAULT_EXTRA_COMPRESSIBLE_TYPES);
+  // `none` rather than an empty string on purpose: in a Windows .cmd a bare `set X=` UNSETS the variable,
+  // so "empty" cannot be expressed there and would silently mean "take the default".
+  assert.deepEqual(parseExtraCompressibleTypes('none'), []);
+  assert.deepEqual(parseExtraCompressibleTypes('NONE'), []);
+  assert.deepEqual(parseExtraCompressibleTypes(''), []);
+  assert.deepEqual([...parseExtraCompressibleTypes('b.start, m.ticker ,b.start')], ['b.start', 'm.ticker']);
+});
+
+test('the base set never moves with the switch — a rollback takes back the extras, not everything', () => {
+  assert.deepEqual([...STRONGHOLD_COMPRESSIBLE_TYPES], ['b.snap', 'b.ev', 'm.field', 'm.public', 'm.private', 'm.result']);
+  const withExtras = compressibleTypesFrom({ WS_COMPRESS_EXTRA: undefined });
+  const rolledBack = compressibleTypesFrom({ WS_COMPRESS_EXTRA: 'none' });
+  assert.ok(withExtras.includes('b.start'));
+  assert.ok(!rolledBack.includes('b.start'), 'the rollback must drop b.start');
+  for (const t of STRONGHOLD_COMPRESSIBLE_TYPES) assert.ok(rolledBack.includes(t), `${t} must survive the rollback`);
+  assert.equal(rolledBack.length, STRONGHOLD_COMPRESSIBLE_TYPES.length);
+});
+
+test('b.start is compressed by default and is NOT droppable', () => {
+  assert.equal(createCompressFilter()('b.start'), true);
+  assert.ok(compressibleTypes().includes('b.start'));
+  // The one droppable type must stay the one whose loss the protocol already tolerates: a dropped frame
+  // never enters the deflate context, so a droppable frame that WAS compressed would desync the rest.
+  assert.equal(createCompressFilter()('b.start'), true);
 });

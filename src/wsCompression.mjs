@@ -85,18 +85,68 @@ export const STRONGHOLD_COMPRESSIBLE_TYPES = Object.freeze([
 ]);
 
 /**
+ * Types compressed ON TOP of `STRONGHOLD_COMPRESSIBLE_TYPES`, and why this is a separate list rather than
+ * more entries in it: **the base set and the mode have different risk profiles, and a whitelist edit used
+ * to have no way back.** The mode is reversible in one word (`WS_COMPRESSION=safe`) while a type list was
+ * code — reverting it meant revert-plus-redeploy.
+ *
+ * `b.start` is the first entry and the clearest argument for the switch existing: it carries the battle
+ * spec the client replays (~4.2 KB, once per field per player) and it is NOT droppable, so a bad
+ * interaction with context takeover would have no fast way out. On a live seat it was 72.5 B/s — 69% of
+ * the whole uplink — because it was the only large frame going out raw; measured over a real interleaved
+ * stream it compresses ~13x. `WS_COMPRESS_EXTRA=none` takes it back without a deploy.
+ *
+ * ⚠️ A type that carries a LARGE payload and is NOT listed is the expensive kind of mistake: it pays full
+ * price in every frame and is invisible in a smoke test. Re-measure the per-type table whenever a new
+ * frame type joins the protocol — `compressibleTypes()` reports the resolved list so this is checkable in
+ * production instead of inferred.
+ */
+export const DEFAULT_EXTRA_COMPRESSIBLE_TYPES = Object.freeze(['b.start']);
+
+/**
+ * Parse the extra-type spec. `undefined` (unset) takes the default; the literal `none` — or an empty
+ * value — selects NO extras, which is the one-word rollback; anything else is a comma-separated list.
+ *
+ * The word rather than an empty string is deliberate: in a Windows `.cmd` a bare `set X=` UNSETS the
+ * variable, so "empty" cannot be expressed there and would silently take the default — the opposite of
+ * what an operator means by it.
+ * @param {string | undefined | null} spec
+ * @returns {readonly string[]}
+ */
+export function parseExtraCompressibleTypes(spec) {
+  if (spec === undefined || spec === null) return DEFAULT_EXTRA_COMPRESSIBLE_TYPES;
+  const s = String(spec).trim().toLowerCase();
+  if (s === '' || s === 'none') return [];
+  return Object.freeze([...new Set(s.split(',').map((t) => t.trim()).filter(Boolean))]);
+}
+
+/** The set a process compresses with: the base list plus the extras it was configured with. */
+function resolvedTypes(env) {
+  const extra = env && typeof env === 'object' ? env.WS_COMPRESS_EXTRA : undefined;
+  return new Set([...STRONGHOLD_COMPRESSIBLE_TYPES, ...parseExtraCompressibleTypes(extra)]);
+}
+
+/** The resolved list for the CURRENT process: what is compressed, observably (not inferred). */
+export function compressibleTypes() {
+  return [...resolvedTypes(globalThis.process ? globalThis.process.env : undefined)];
+}
+
+/** The same list for a given env object — what a test or a tool wants. */
+export function compressibleTypesFrom(env) {
+  return [...resolvedTypes(env)];
+}
+
+/**
  * A whitelist predicate over message type names. Only what is listed gets compressed; everything else
  * — credentials, handshake, control and request/response traffic — goes out untouched, which also keeps
  * small frames from growing.
  *
- * ⚠️ A type that carries a LARGE payload and is NOT listed is the expensive kind of mistake: it pays
- * full price in every frame and is invisible in a smoke test. Stronghold's `b.start` (the battle spec
- * the client replays, ~4.2 KB) sat outside the list until it was measured at 72.5 B/s — 69% of the
- * whole uplink. Re-measure the type table whenever a new frame type joins the protocol.
- * @param {Iterable<string>} [types] defaults to the Stronghold set
+ * With no argument the set comes from `WS_COMPRESS_EXTRA` (see above), so an operator can drop the extras
+ * without touching code. Pass a set to pin it.
+ * @param {Iterable<string>} [types] defaults to the base set ∪ `WS_COMPRESS_EXTRA`
  * @returns {(type: unknown) => boolean}
  */
-export function createCompressFilter(types = STRONGHOLD_COMPRESSIBLE_TYPES) {
+export function createCompressFilter(types = resolvedTypes(globalThis.process ? globalThis.process.env : undefined)) {
   const set = new Set(types);
   return (type) => set.has(type);
 }
